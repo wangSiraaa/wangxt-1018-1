@@ -1,0 +1,21 @@
+services:
+  pharma-visitor-web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: pharma-exhibition-visitor
+    restart: unless-stopped
+    ports:
+      - "4173:4173"
+    environment:
+      - NODE_ENV=production
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:4173/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    labels:
+      app: "pharma-exhibition-visitor"
+      version: "1.0.0"
+      description: "药企展厅访客预约系统"
