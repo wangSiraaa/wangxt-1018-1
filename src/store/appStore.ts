@@ -57,7 +57,7 @@ interface AppState {
   updateRecordStatus: (recordId: string, status: VisitStatus, extra?: Partial<VisitRecord>) => void
   getRecordById: (recordId: string) => VisitRecord | undefined
 
-  cancelVisitRecord: (recordId: string, operator: string) => { success: boolean; message?: string }
+  cancelVisitRecord: (recordId: string, operator: string) => { success: boolean; message?: string; promoted?: VisitRecord[] }
 
   checkIn: (recordId: string, operator: string) => { success: boolean; message?: string }
 
@@ -308,10 +308,11 @@ export const useAppStore = create<AppState>((set, get) => ({
       return { success: false, message: '订单已是终态，无法取消' }
     }
     get().updateRecordStatus(recordId, 'cancelled')
+    let promoted: VisitRecord[] = []
     if (record.inWaitingList) {
       get().computeWaitingRanks()
     } else {
-      get().processWaitingListPromotion(record.batchId)
+      promoted = get().processWaitingListPromotion(record.batchId)
     }
     get().addAuditLog({
       operator,
@@ -321,7 +322,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       targetName: record.companyName,
       details: `预约被取消，${record.totalPeople}人释放名额`,
     })
-    return { success: true }
+    return { success: true, promoted }
   },
 
   checkIn: (recordId, operator) => {

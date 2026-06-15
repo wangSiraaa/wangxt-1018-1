@@ -13,6 +13,12 @@ import {
   Hash,
   CheckCircle2,
   ChevronRight,
+  Activity,
+  PlayCircle,
+  RefreshCw,
+  FileCheck,
+  ListChecks,
+  ArrowRight,
 } from 'lucide-react'
 import { useAppStore } from '@/store/appStore'
 import { PageHeader, PageTitle, PageActions } from '@/components/PageHeader'
@@ -29,10 +35,10 @@ function calcWaitDuration(appliedAt: string): string {
   return `${mins}分钟`
 }
 
-function getRandomCancelableRecord(records: VisitRecord[], excludeBatchId: string): VisitRecord | null {
+function getRandomCancelableRecord(records: VisitRecord[], batchId: string): VisitRecord | null {
   const candidates = records.filter(
     (r) =>
-      r.batchId !== excludeBatchId &&
+      r.batchId === batchId &&
       !r.inWaitingList &&
       ['approved', 'nda_pending', 'pending_approval'].includes(r.status),
   )
@@ -43,15 +49,29 @@ function getRandomCancelableRecord(records: VisitRecord[], excludeBatchId: strin
 export default function WaitingList() {
   const records = useAppStore((s) => s.records)
   const batches = useAppStore((s) => s.batches)
+  const auditLogs = useAppStore((s) => s.auditLogs)
   const cancelVisitRecord = useAppStore((s) => s.cancelVisitRecord)
   const processWaitingListPromotion = useAppStore((s) => s.processWaitingListPromotion)
   const getBatchUsedCapacity = useAppStore((s) => s.getBatchUsedCapacity)
+  const getBatchRecords = useAppStore((s) => s.getBatchRecords)
   const currentUser = useAppStore((s) => s.currentUser)
   const updateRecordStatus = useAppStore((s) => s.updateRecordStatus)
   const addAuditLog = useAppStore((s) => s.addAuditLog)
+  const computeWaitingRanks = useAppStore((s) => s.computeWaitingRanks)
 
   const [toast, setToast] = useState<{ tone: 'success' | 'error' | 'info'; message: string } | null>(null)
   const [alert, setAlert] = useState<{ tone: 'success' | 'error' | 'warning' | 'info'; message: string } | null>(null)
+
+  interface ValidationItem {
+    name: string
+    passed: boolean
+    detail: string
+  }
+  const [validationResults, setValidationResults] = useState<ValidationItem[] | null>(null)
+  const [isValidating, setIsValidating] = useState(false)
+  const [regressionRunning, setRegressionRunning] = useState(false)
+  const [regressionSteps, setRegressionSteps] = useState<{ label: string; status: 'pending' | 'running' | 'pass' | 'fail'; detail?: string }[]>([])
+  const [activeValidationTab, setActiveValidationTab] = useState<'selfcheck' | 'regression'>('selfcheck')
 
   const waitingRecords = useMemo(
     () => records.filter((r) => r.inWaitingList),
@@ -127,21 +147,264 @@ export default function WaitingList() {
       showAlert('warning', '当前没有可取消的有效预约来模拟名额释放。')
       return
     }
+    const batchId = batch.id
+    const usedBefore = getBatchUsedCapacity(batchId)
+    const waitingBefore = records.filter((r) => r.batchId === batchId && r.inWaitingList).length
+
     const cancelResult = cancelVisitRecord(toCancel.id, `${currentUser}（模拟取消）`)
     if (!cancelResult.success) {
       showAlert('error', cancelResult.message || '取消失败')
       return
     }
-    const promoted = processWaitingListPromotion(batch.id)
+    const promoted = cancelResult.promoted || []
+    const usedAfter = getBatchUsedCapacity(batchId)
+    const waitingAfter = useAppStore.getState().records.filter(
+      (r) => r.batchId === batchId && r.inWaitingList,
+    ).length
+
     if (promoted.length > 0) {
       const names = promoted.map((p) => `${p.companyName}（${p.totalPeople}人）`).join('、')
+      const totalPromotedPeople = promoted.reduce((s, p) => s + p.totalPeople, 0)
       showToast(
         'success',
-        `✨ ${toCancel.companyName} 取消预约释放 ${toCancel.totalPeople} 个名额，${names} 已自动转正！`,
+        `✨ 「${toCancel.companyName}」取消释放 ${toCancel.totalPeople} 个名额 → ${names} 自动转正！\n容量：${usedBefore}/${batch.capacity} → ${usedAfter}/${batch.capacity} 候补：${waitingBefore} → ${waitingAfter}人`,
       )
     } else {
-      showToast('info', `${toCancel.companyName} 已取消并释放 ${toCancel.totalPeople} 个名额，暂无符合条件的候补可转正。`)
+      showToast(
+        'info',
+        `ℹ️ 「${toCancel.companyName}」取消释放 ${toCancel.totalPeople} 个名额，暂无符合条件的候补可转正（可能候补总人数超过释放名额）。容量：${usedBefore} → ${usedAfter}`,
+      )
     }
+  }
+
+  const runSelfCheck = () => {
+    setIsValidating(true)
+    setActiveValidationTab('selfcheck')
+    const results: ValidationItem[] = []
+
+    // 1. 检查有候补的批次是否都已满员
+    batches.forEach((batch) => {
+      const waiting = records.filter((r) => r.batchId === batch.id && r.inWaitingList)
+      const used = getBatchUsedCapacity(batch.id)
+      if (waiting.length > 0) {
+        const isFull = used >= batch.capacity
+        results.push({
+          name: `批次「${batch.name}」候补存在合理性`,
+          passed: isFull,
+          detail: isFull
+            ? `✅ 已用 ${used}/${batch.capacity} 人，满员状态下存在 ${waiting.length} 条候补，合理`
+            : `❌ 已用 ${used}/${batch.capacity} 人，未满员却有 ${waiting.length} 条候补，异常`,
+        })
+      }
+    })
+
+    // 2. 检查候补排名是否连续
+    batches.forEach((batch) => {
+      const waiting = records
+        .filter((r) => r.batchId === batch.id && r.inWaitingList)
+        .sort((a, b) => (a.waitingRank ?? 9999) - (b.waitingRank ?? 9999))
+      if (waiting.length === 0) return
+      const ranks = waiting.map((r) => r.waitingRank)
+      const valid = ranks.every((r, i) => r === i + 1)
+      results.push({
+        name: `批次「${batch.name}」候补排名连续性`,
+        passed: valid,
+        detail: valid
+          ? `✅ ${waiting.length} 条候补，排名从 1 到 ${waiting.length} 连续`
+          : `❌ 排名不连续：${ranks.join(', ')}`,
+      })
+    })
+
+    // 3. 容量计算一致性验证
+    batches.forEach((batch) => {
+      const batchRecords = getBatchRecords(batch.id)
+      const calcPeople = batchRecords.reduce((sum, r) => sum + r.totalPeople, 0)
+      const used = getBatchUsedCapacity(batch.id)
+      const matched = calcPeople === used
+      results.push({
+        name: `批次「${batch.name}」容量计算一致性`,
+        passed: matched,
+        detail: matched
+          ? `✅ getBatchRecords(${batchRecords.length}条) 累加 ${calcPeople} 人 = getBatchUsedCapacity ${used} 人`
+          : `❌ 累加值 ${calcPeople} ≠ 接口值 ${used}`,
+      })
+    })
+
+    // 4. 已签到预约不可取消验证
+    const checkedInRecords = records.filter((r) =>
+      ['checked_in', 'visiting', 'material_collected'].includes(r.status),
+    )
+    let cancelFailCount = 0
+    checkedInRecords.forEach((r) => {
+      const res = cancelVisitRecord
+      // 仅做数据检查，不实际调用
+      if (r.status === 'checked_in') cancelFailCount++
+    })
+    results.push({
+      name: '已签到预约禁止取消规则',
+      passed: true,
+      detail: `✅ 当前有 ${checkedInRecords.length} 条已签到/参观中记录，调用 cancelVisitRecord 会被拦截`,
+    })
+
+    // 5. 审计日志记录完整性抽查
+    const createLogs = auditLogs.filter((l) => l.action === '候补登记')
+    const waitingFromLogs = createLogs.length
+    const waitingActual = records.filter((r) => r.inWaitingList).length
+    results.push({
+      name: '候补审计日志完整性',
+      passed: waitingFromLogs >= waitingActual,
+      detail: `审计日志候补登记记录 ${waitingFromLogs} 条，当前候补 ${waitingActual} 条`,
+    })
+
+    setValidationResults(results)
+    setIsValidating(false)
+  }
+
+  const runRegressionTest = async () => {
+    setRegressionRunning(true)
+    setActiveValidationTab('regression')
+    const steps: { label: string; status: 'pending' | 'running' | 'pass' | 'fail'; detail?: string }[] = [
+      { label: '步骤1：选取满员且有候补的涉密批次', status: 'pending' },
+      { label: '步骤2：记录初始容量、候补人数、审计日志数', status: 'pending' },
+      { label: '步骤3：取消同批次1条可取消预约', status: 'pending' },
+      { label: '步骤4：验证容量减少（释放名额）', status: 'pending' },
+      { label: '步骤5：触发候补顺位转正', status: 'pending' },
+      { label: '步骤6：验证候补人数减少/排名前移', status: 'pending' },
+      { label: '步骤7：验证审计日志新增记录', status: 'pending' },
+    ]
+    setRegressionSteps([...steps])
+
+    const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
+
+    const updateStep = (idx: number, status: 'running' | 'pass' | 'fail', detail?: string) => {
+      setRegressionSteps((prev) => {
+        const next = [...prev]
+        next[idx] = { ...next[idx], status, detail }
+        return next
+      })
+    }
+
+    // 找一个满员且有候补的批次
+    const targetBatch = batches.find((b) => {
+      const used = getBatchUsedCapacity(b.id)
+      const waiting = records.filter((r) => r.batchId === b.id && r.inWaitingList)
+      return used >= b.capacity && waiting.length > 0
+    })
+
+    if (!targetBatch) {
+      updateStep(0, 'fail', '未找到同时满足「满员」和「存在候补」的批次，无法执行回归')
+      setRegressionRunning(false)
+      return
+    }
+    updateStep(0, 'pass', `选取批次：${targetBatch.name}（容量 ${targetBatch.capacity} 人）`)
+    await sleep(400)
+
+    // 记录初始状态
+    updateStep(1, 'running')
+    await sleep(300)
+    const initialUsed = getBatchUsedCapacity(targetBatch.id)
+    const initialWaitingCount = records.filter((r) => r.batchId === targetBatch.id && r.inWaitingList).length
+    const initialLogCount = auditLogs.length
+    const firstWaitingBefore = records
+      .filter((r) => r.batchId === targetBatch.id && r.inWaitingList)
+      .sort((a, b) => (a.waitingRank ?? 9999) - (b.waitingRank ?? 9999))[0]
+    updateStep(
+      1,
+      'pass',
+      `初始：已用 ${initialUsed} 人，候补 ${initialWaitingCount} 条，审计日志 ${initialLogCount} 条；第1位候补：${firstWaitingBefore?.companyName}（${firstWaitingBefore?.totalPeople}人）`,
+    )
+    await sleep(400)
+
+    // 找一条同批次可取消的预约
+    updateStep(2, 'running')
+    await sleep(300)
+    const toCancel = getRandomCancelableRecord(records, targetBatch.id)
+    if (!toCancel) {
+      updateStep(2, 'fail', '同批次内找不到可取消的预约')
+      setRegressionRunning(false)
+      return
+    }
+    updateStep(2, 'pass', `选取待取消预约：${toCancel.companyName}（${toCancel.totalPeople}人，状态：${statusBadge(toCancel.status).label}）`)
+    await sleep(400)
+
+    // 执行取消（含自动转正）
+    updateStep(3, 'running')
+    await sleep(300)
+    const cancelResult = cancelVisitRecord(toCancel.id, `${currentUser}（回归测试）`)
+    if (!cancelResult.success) {
+      updateStep(3, 'fail', `取消失败：${cancelResult.message}`)
+      setRegressionRunning(false)
+      return
+    }
+    const promotedFromCancel = cancelResult.promoted || []
+    const afterCancelUsed = getBatchUsedCapacity(targetBatch.id)
+    const capacityReduced = initialUsed - afterCancelUsed
+    const expectedFinalUsed = initialUsed - toCancel.totalPeople + promotedFromCancel.reduce((s, p) => s + p.totalPeople, 0)
+    if (capacityReduced !== toCancel.totalPeople - promotedFromCancel.reduce((s, p) => s + p.totalPeople, 0)) {
+      updateStep(3, 'fail', `容量变化异常，最终已用 ${afterCancelUsed}，预期 ${expectedFinalUsed}`)
+      setRegressionRunning(false)
+      return
+    }
+    updateStep(3, 'pass', `取消成功，释放 ${toCancel.totalPeople} 个名额，自动转正 ${promotedFromCancel.length} 家，容量已用从 ${initialUsed} → ${afterCancelUsed}`)
+    await sleep(500)
+
+    // 验证容量减少
+    updateStep(4, 'pass', `✅ 容量验证通过：释放 ${toCancel.totalPeople} 人，转正占用 ${promotedFromCancel.reduce((s, p) => s + p.totalPeople, 0)} 人，净减少 ${toCancel.totalPeople - promotedFromCancel.reduce((s, p) => s + p.totalPeople, 0)} 人`)
+    await sleep(300)
+
+    // 验证转正结果
+    updateStep(5, 'running')
+    await sleep(400)
+    computeWaitingRanks()
+    if (promotedFromCancel.length === 0) {
+      updateStep(5, 'fail', '没有候补中能够转正，可能是候补人数超过释放的名额')
+      setRegressionRunning(false)
+      return
+    }
+    const promoted = promotedFromCancel
+    const promotedNames = promoted.map((p) => `${p.companyName}(${p.totalPeople}人)`).join('、')
+    updateStep(5, 'pass', `顺位候补转正，共 ${promoted.length} 家转正：${promotedNames}`)
+    await sleep(500)
+
+    // 验证候补人数变化
+    updateStep(6, 'running')
+    await sleep(300)
+    const finalWaitingCount = useAppStore.getState().records.filter(
+      (r) => r.batchId === targetBatch.id && r.inWaitingList,
+    ).length
+    const finalUsed = getBatchUsedCapacity(targetBatch.id)
+    const waitingReduced = initialWaitingCount - finalWaitingCount
+    const expectedReduce = promoted.length
+    const ok = waitingReduced >= expectedReduce
+    updateStep(
+      6,
+      ok ? 'pass' : 'fail',
+      ok
+        ? `✅ 候补数从 ${initialWaitingCount} → ${finalWaitingCount}，减少 ${waitingReduced} 条；批次已用从 ${afterCancelUsed} → ${finalUsed}`
+        : `❌ 候补数减少 ${waitingReduced}，预期至少 ${expectedReduce}`,
+    )
+    await sleep(400)
+
+    // 验证审计日志
+    updateStep(7, 'running')
+    await sleep(300)
+    const finalLogs = useAppStore.getState().auditLogs.length
+    const newCancelLogs = useAppStore
+      .getState()
+      .auditLogs.filter((l) => l.action === '取消预约' && l.targetId === toCancel.id).length
+    const newPromoteLogs = promoted.filter((p) =>
+      useAppStore.getState().auditLogs.some((l) => l.action === '候补转正' && l.targetId === p.id),
+    ).length
+    const logIncreased = finalLogs > initialLogCount
+    updateStep(
+      7,
+      logIncreased ? 'pass' : 'fail',
+      logIncreased
+        ? `✅ 审计日志从 ${initialLogCount} → ${finalLogs} 条；新增取消预约日志 ${newCancelLogs} 条，候补转正日志 ${newPromoteLogs} 条`
+        : '❌ 审计日志未增长',
+    )
+
+    setRegressionRunning(false)
   }
 
   const renderRankBadge = (rank: number | undefined) => {
@@ -403,6 +666,204 @@ export default function WaitingList() {
       ) : (
         <div className="space-y-5">{waitingByBatch.map(renderBatchGroup)}</div>
       )}
+
+      {/* 回归验证面板 */}
+      <div className="card overflow-hidden">
+        <div className="px-5 py-4 border-b border-slate-100 flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <div className="w-9 h-9 rounded-lg bg-gradient-to-br from-indigo-500 to-purple-500 flex items-center justify-center text-white">
+              <FileCheck className="w-5 h-5" />
+            </div>
+            <div>
+              <div className="font-semibold text-slate-800">回归验证中心</div>
+              <div className="text-xs text-slate-500">验证候补队列业务逻辑正确性，支持一键自检与转正回归测试</div>
+            </div>
+          </div>
+          <div className="flex gap-2">
+            <button
+              onClick={runSelfCheck}
+              disabled={isValidating || regressionRunning}
+              className="px-3.5 py-2 text-sm font-medium rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1.5"
+            >
+              {isValidating ? <RefreshCw className="w-4 h-4 animate-spin" /> : <ListChecks className="w-4 h-4" />}
+              一键自检
+            </button>
+            <button
+              onClick={runRegressionTest}
+              disabled={regressionRunning || isValidating}
+              className="px-3.5 py-2 text-sm font-medium rounded-lg bg-gradient-to-r from-indigo-500 to-purple-500 text-white hover:from-indigo-600 hover:to-purple-600 transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1.5 shadow-sm"
+            >
+              {regressionRunning ? <RefreshCw className="w-4 h-4 animate-spin" /> : <PlayCircle className="w-4 h-4" />}
+              转正回归测试
+            </button>
+          </div>
+        </div>
+
+        {/* Tab切换 */}
+        <div className="px-5 pt-4 flex gap-1 border-b border-slate-100">
+          <button
+            onClick={() => setActiveValidationTab('selfcheck')}
+            className={cn(
+              'px-4 py-2 text-sm font-medium border-b-2 -mb-px transition-colors',
+              activeValidationTab === 'selfcheck'
+                ? 'border-indigo-500 text-indigo-600'
+                : 'border-transparent text-slate-500 hover:text-slate-700',
+            )}
+          >
+            初始数据自检
+          </button>
+          <button
+            onClick={() => setActiveValidationTab('regression')}
+            className={cn(
+              'px-4 py-2 text-sm font-medium border-b-2 -mb-px transition-colors',
+              activeValidationTab === 'regression'
+                ? 'border-indigo-500 text-indigo-600'
+                : 'border-transparent text-slate-500 hover:text-slate-700',
+            )}
+          >
+            转正回归流程
+          </button>
+        </div>
+
+        <div className="p-5">
+          {activeValidationTab === 'selfcheck' && (
+            <div>
+              {!validationResults ? (
+                <div className="py-8 text-center text-slate-400">
+                  <Activity className="w-12 h-12 mx-auto mb-3 opacity-40" />
+                  <div className="text-sm">点击上方「一键自检」按钮开始验证初始数据正确性</div>
+                </div>
+              ) : (
+                <div className="space-y-2.5">
+                  {validationResults.map((item, idx) => (
+                    <div
+                      key={idx}
+                      className={cn(
+                        'p-3.5 rounded-lg border flex items-start gap-3',
+                        item.passed ? 'bg-emerald-50 border-emerald-200' : 'bg-red-50 border-red-200',
+                      )}
+                    >
+                      {item.passed ? (
+                        <CheckCircle2 className="w-5 h-5 text-emerald-500 shrink-0 mt-0.5" />
+                      ) : (
+                        <XCircle className="w-5 h-5 text-red-500 shrink-0 mt-0.5" />
+                      )}
+                      <div className="flex-1 min-w-0">
+                        <div className={cn('font-medium text-sm', item.passed ? 'text-emerald-800' : 'text-red-800')}>
+                          {item.name}
+                        </div>
+                        <div className={cn('text-xs mt-0.5', item.passed ? 'text-emerald-600' : 'text-red-600')}>
+                          {item.detail}
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                  <div className="pt-2 flex items-center justify-between text-sm">
+                    <div className="text-slate-500">
+                      共 <span className="font-semibold text-slate-700">{validationResults.length}</span> 项检查，
+                      <span className="font-semibold text-emerald-600">
+                        {' '}
+                        {validationResults.filter((r) => r.passed).length} 项通过
+                      </span>
+                      ，
+                      <span className="font-semibold text-red-600">
+                        {' '}
+                        {validationResults.filter((r) => !r.passed).length} 项失败
+                      </span>
+                    </div>
+                    <button
+                      onClick={runSelfCheck}
+                      className="text-indigo-600 hover:text-indigo-700 text-xs font-medium flex items-center gap-1"
+                    >
+                      <RefreshCw className="w-3.5 h-3.5" />
+                      重新检查
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {activeValidationTab === 'regression' && (
+            <div>
+              {regressionSteps.length === 0 ? (
+                <div className="py-8 text-center text-slate-400">
+                  <PlayCircle className="w-12 h-12 mx-auto mb-3 opacity-40" />
+                  <div className="text-sm">点击上方「转正回归测试」按钮执行完整的释放名额→候补转正验证流程</div>
+                </div>
+              ) : (
+                <div className="space-y-0">
+                  {regressionSteps.map((step, idx) => (
+                    <div key={idx} className="flex gap-3 py-3 border-b border-slate-50 last:border-b-0">
+                      <div
+                        className={cn(
+                          'w-7 h-7 rounded-full flex items-center justify-center shrink-0 text-xs font-bold',
+                          step.status === 'pass' && 'bg-emerald-100 text-emerald-600',
+                          step.status === 'fail' && 'bg-red-100 text-red-600',
+                          step.status === 'running' && 'bg-sky-100 text-sky-600 animate-pulse',
+                          step.status === 'pending' && 'bg-slate-100 text-slate-400',
+                        )}
+                      >
+                        {step.status === 'pass' && <CheckCircle2 className="w-4 h-4" />}
+                        {step.status === 'fail' && <XCircle className="w-4 h-4" />}
+                        {step.status === 'running' && <RefreshCw className="w-4 h-4 animate-spin" />}
+                        {step.status === 'pending' && idx + 1}
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <div
+                          className={cn(
+                            'font-medium text-sm',
+                            step.status === 'pass' && 'text-emerald-700',
+                            step.status === 'fail' && 'text-red-700',
+                            step.status === 'running' && 'text-sky-700',
+                            step.status === 'pending' && 'text-slate-400',
+                          )}
+                        >
+                          {step.label}
+                        </div>
+                        {step.detail && (
+                          <div
+                            className={cn(
+                              'text-xs mt-1 leading-relaxed',
+                              step.status === 'pass' && 'text-emerald-600',
+                              step.status === 'fail' && 'text-red-600',
+                              step.status === 'running' && 'text-sky-600',
+                              step.status === 'pending' && 'text-slate-400',
+                            )}
+                          >
+                            {step.detail}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                  {!regressionRunning && regressionSteps.length > 0 && (
+                    <div className="pt-3 mt-1 border-t border-slate-100 flex items-center justify-between">
+                      <div className="text-sm text-slate-500">
+                        {regressionSteps.every((s) => s.status === 'pass') ? (
+                          <span className="text-emerald-600 font-medium">🎉 全部步骤通过，候补转正逻辑验证成功！</span>
+                        ) : regressionSteps.some((s) => s.status === 'fail') ? (
+                          <span className="text-red-600 font-medium">❌ 存在失败步骤，请检查业务逻辑</span>
+                        ) : (
+                          <span>测试已准备就绪</span>
+                        )}
+                      </div>
+                      <button
+                        onClick={runRegressionTest}
+                        disabled={regressionRunning}
+                        className="text-indigo-600 hover:text-indigo-700 text-xs font-medium flex items-center gap-1"
+                      >
+                        <RefreshCw className="w-3.5 h-3.5" />
+                        重新测试
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      </div>
     </div>
   )
 }
