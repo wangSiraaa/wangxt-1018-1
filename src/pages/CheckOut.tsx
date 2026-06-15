@@ -17,13 +17,20 @@ import {
   Phone,
   StickyNote,
   Search,
+  RotateCcw,
+  AlertTriangle,
+  Smartphone,
+  Briefcase,
+  Award,
+  ShoppingBag,
+  Shirt,
 } from 'lucide-react'
 import { useAppStore } from '@/store/appStore'
 import { cn, todayStr, formatDateTime, maskPhone, statusBadge } from '@/lib/utils'
 import { PageHeader, PageTitle } from '@/components/PageHeader'
 import StatCard from '@/components/StatCard'
 import Alert from '@/components/Alert'
-import type { VisitRecord } from '@/types'
+import type { VisitRecord, MaterialType } from '@/types'
 
 type TabKey = 'inhouse' | 'checkedout'
 
@@ -36,15 +43,26 @@ interface CheckOutForm {
   remark?: string
 }
 
+interface MaterialReturnState {
+  [materialId: string]: {
+    returned: boolean
+    condition: 'good' | 'damaged' | 'lost'
+  }
+}
+
 export default function CheckOut() {
   const records = useAppStore((s) => s.records)
   const currentUser = useAppStore((s) => s.currentUser)
   const checkOut = useAppStore((s) => s.checkOut)
+  const returnMaterial = useAppStore((s) => s.returnMaterial)
+  const checkUnreturnedMaterials = useAppStore((s) => s.checkUnreturnedMaterials)
 
   const [activeTab, setActiveTab] = useState<TabKey>('inhouse')
   const [selectedRecordId, setSelectedRecordId] = useState<string | null>(null)
   const [searchText, setSearchText] = useState('')
-  const [alertMsg, setAlertMsg] = useState<{ type: 'success' | 'error'; text: string } | null>(null)
+  const [alertMsg, setAlertMsg] = useState<{ type: 'success' | 'error' | 'warning'; text: string } | null>(null)
+  const [materialReturnState, setMaterialReturnState] = useState<MaterialReturnState>({})
+  const [showUnreturnedWarning, setShowUnreturnedWarning] = useState(false)
   const [form, setForm] = useState<CheckOutForm>({
     badgeReturned: 0,
     cameraCheck: 'normal',
@@ -92,6 +110,57 @@ export default function CheckOut() {
     return selectedRecord.materials.filter((m) => m.collectedAt)
   }, [selectedRecord])
 
+  const unreturnedMaterials = useMemo(() => {
+    if (!selectedRecord) return []
+    return checkUnreturnedMaterials(selectedRecord.id)
+  }, [selectedRecord, checkUnreturnedMaterials])
+
+  const materialReturnStats = useMemo(() => {
+    if (!selectedRecord) return { total: 0, returned: 0, unreturned: 0 }
+    const total = collectedMaterials.length
+    const returned = collectedMaterials.filter((m) => m.returnedAt).length
+    return { total, returned, unreturned: total - returned }
+  }, [selectedRecord, collectedMaterials])
+
+  const getMaterialIcon = (type: MaterialType) => {
+    const icons = {
+      brochure: Briefcase,
+      badge: Award,
+      bag: ShoppingBag,
+      phone_bag: Smartphone,
+      sample: Package,
+      safety_vest: Shirt,
+    }
+    const Icon = icons[type] || Package
+    return <Icon className="w-4 h-4" />
+  }
+
+  const getMaterialTypeLabel = (type: MaterialType) => {
+    const labels: Record<MaterialType, string> = {
+      brochure: '宣传册',
+      badge: '胸卡',
+      bag: '手提袋',
+      phone_bag: '手机封存袋',
+      sample: '样品',
+      safety_vest: '安全背心',
+    }
+    return labels[type] || '其他'
+  }
+
+  const getConditionLabel = (condition: 'good' | 'damaged' | 'lost') => {
+    const labels = { good: '完好', damaged: '损坏', lost: '遗失' }
+    return labels[condition]
+  }
+
+  const getConditionColor = (condition: 'good' | 'damaged' | 'lost') => {
+    const colors = {
+      good: 'text-emerald-600 bg-emerald-50',
+      damaged: 'text-amber-600 bg-amber-50',
+      lost: 'text-red-600 bg-red-50',
+    }
+    return colors[condition]
+  }
+
   const handleSelectRecord = (record: VisitRecord) => {
     setSelectedRecordId(record.id)
     setForm({
@@ -102,10 +171,60 @@ export default function CheckOut() {
       cameraNote: '',
       belongingsNote: '',
     })
+    const initState: MaterialReturnState = {}
+    record.materials.forEach((m) => {
+      if (m.collectedAt) {
+        initState[m.id] = {
+          returned: !!m.returnedAt,
+          condition: m.returnCondition || 'good',
+        }
+      }
+    })
+    setMaterialReturnState(initState)
+    setShowUnreturnedWarning(false)
+  }
+
+  const handleReturnMaterial = (materialId: string) => {
+    if (!selectedRecord || !currentUser) return
+    const state = materialReturnState[materialId] || { returned: false, condition: 'good' }
+    const success = returnMaterial(
+      selectedRecord.id,
+      materialId,
+      1,
+      currentUser,
+      state.condition,
+    )
+    if (success) {
+      setMaterialReturnState((prev) => ({
+        ...prev,
+        [materialId]: { ...prev[materialId], returned: true },
+      }))
+      setAlertMsg({ type: 'success', text: '物料归还成功' })
+      setTimeout(() => setAlertMsg(null), 2000)
+    }
+  }
+
+  const handleMaterialConditionChange = (materialId: string, condition: 'good' | 'damaged' | 'lost') => {
+    setMaterialReturnState((prev) => ({
+      ...prev,
+      [materialId]: { ...prev[materialId], condition },
+    }))
   }
 
   const handleCheckOut = () => {
     if (!selectedRecord) return
+
+    const unreturned = checkUnreturnedMaterials(selectedRecord.id)
+    if (unreturned.length > 0) {
+      setShowUnreturnedWarning(true)
+      setAlertMsg({
+        type: 'warning',
+        text: `还有 ${unreturned.length} 项物料未归还，请先完成物料归还`,
+      })
+      setTimeout(() => setAlertMsg(null), 4000)
+      return
+    }
+
     if (form.badgeReturned < selectedRecord.totalPeople) {
       if (
         !confirm(
@@ -382,6 +501,191 @@ export default function CheckOut() {
 
                 {activeTab === 'inhouse' && (
                   <>
+                    <div className="grid grid-cols-3 gap-2">
+                      <StatCard
+                        label="应归还"
+                        value={materialReturnStats.total}
+                        icon={<Package className="w-4 h-4" />}
+                        tone="slate"
+                        size="sm"
+                      />
+                      <StatCard
+                        label="已归还"
+                        value={materialReturnStats.returned}
+                        icon={<CheckCircle2 className="w-4 h-4" />}
+                        tone="emerald"
+                        size="sm"
+                      />
+                      <StatCard
+                        label="未归还"
+                        value={materialReturnStats.unreturned}
+                        icon={<XCircle className="w-4 h-4" />}
+                        tone={materialReturnStats.unreturned > 0 ? 'red' : 'slate'}
+                        size="sm"
+                      />
+                    </div>
+
+                    {showUnreturnedWarning && unreturnedMaterials.length > 0 && (
+                      <div className="bg-red-50 border border-red-200 rounded-xl p-4">
+                        <div className="flex items-start gap-2">
+                          <AlertTriangle className="w-5 h-5 text-red-500 shrink-0 mt-0.5" />
+                          <div className="flex-1">
+                            <div className="text-sm font-semibold text-red-700">
+                              物料未归还提醒
+                            </div>
+                            <div className="text-xs text-red-600 mt-1">
+                              以下 {unreturnedMaterials.length} 项物料尚未归还，请先完成归还再离场：
+                            </div>
+                            <div className="mt-2 space-y-1">
+                              {unreturnedMaterials.slice(0, 5).map((m, idx) => (
+                                <div key={idx} className="flex items-center gap-2 text-xs text-red-600">
+                                  <span className="w-1.5 h-1.5 rounded-full bg-red-400" />
+                                  {m.name} × {m.quantity}
+                                </div>
+                              ))}
+                              {unreturnedMaterials.length > 5 && (
+                                <div className="text-xs text-red-500">
+                                  还有 {unreturnedMaterials.length - 5} 项未列出...
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    )}
+
+                    <div className="card p-4 border-dashed">
+                      <div className="flex items-center justify-between mb-3">
+                        <div className="flex items-center gap-2 text-sm font-semibold text-slate-700">
+                          <RotateCcw className="w-4 h-4 text-brand-600" />
+                          物料归还检查
+                        </div>
+                        {collectedMaterials.length > 0 && materialReturnStats.unreturned > 0 && (
+                          <button
+                            onClick={() => {
+                              if (!currentUser) return
+                              collectedMaterials.forEach((m) => {
+                                if (!m.returnedAt) {
+                                  returnMaterial(
+                                    selectedRecord!.id,
+                                    m.id,
+                                    m.quantity,
+                                    currentUser,
+                                    materialReturnState[m.id]?.condition || 'good',
+                                  )
+                                  setMaterialReturnState((prev) => ({
+                                    ...prev,
+                                    [m.id]: { ...prev[m.id], returned: true },
+                                  }))
+                                }
+                              })
+                              setAlertMsg({ type: 'success', text: '全部物料已标记为归还' })
+                              setTimeout(() => setAlertMsg(null), 2000)
+                            }}
+                            className="text-xs text-brand-600 hover:text-brand-700 font-medium"
+                          >
+                            一键全部归还
+                          </button>
+                        )}
+                      </div>
+                      {collectedMaterials.length === 0 ? (
+                        <div className="text-sm text-slate-400 text-center py-4">
+                          暂无领取的物料需要归还
+                        </div>
+                      ) : (
+                        <div className="space-y-2">
+                          {collectedMaterials.map((m) => {
+                            const state = materialReturnState[m.id] || { returned: false, condition: 'good' }
+                            const isReturned = !!m.returnedAt || state.returned
+                            return (
+                              <div
+                                key={m.id}
+                                className={cn(
+                                  'border rounded-xl p-3 transition-all',
+                                  isReturned
+                                    ? 'bg-emerald-50/50 border-emerald-200'
+                                    : 'bg-white border-slate-200',
+                                )}
+                              >
+                                <div className="flex items-center justify-between">
+                                  <div className="flex items-center gap-2">
+                                    <div
+                                      className={cn(
+                                        'w-8 h-8 rounded-lg flex items-center justify-center',
+                                        isReturned
+                                          ? 'bg-emerald-100 text-emerald-600'
+                                          : 'bg-slate-100 text-slate-500',
+                                      )}
+                                    >
+                                      {isReturned ? (
+                                        <CheckCircle2 className="w-4 h-4" />
+                                      ) : (
+                                        getMaterialIcon(m.type)
+                                      )}
+                                    </div>
+                                    <div>
+                                      <div
+                                        className={cn(
+                                          'text-sm font-medium',
+                                          isReturned ? 'text-emerald-700' : 'text-slate-700',
+                                        )}
+                                      >
+                                        {m.name}
+                                      </div>
+                                      <div className="text-xs text-slate-500">
+                                        {getMaterialTypeLabel(m.type)} × {m.quantity}
+                                      </div>
+                                    </div>
+                                  </div>
+                                  <div className="flex items-center gap-2">
+                                    {!isReturned ? (
+                                      <>
+                                        <select
+                                          value={state.condition}
+                                          onChange={(e) =>
+                                            handleMaterialConditionChange(
+                                              m.id,
+                                              e.target.value as 'good' | 'damaged' | 'lost',
+                                            )
+                                          }
+                                          className="text-xs border border-slate-200 rounded-lg px-2 py-1 bg-white"
+                                        >
+                                          <option value="good">完好</option>
+                                          <option value="damaged">损坏</option>
+                                          <option value="lost">遗失</option>
+                                        </select>
+                                        <button
+                                          onClick={() => handleReturnMaterial(m.id)}
+                                          className="btn-secondary !py-1 !px-3 text-xs"
+                                        >
+                                          确认归还
+                                        </button>
+                                      </>
+                                    ) : (
+                                      <span
+                                        className={cn(
+                                          'text-xs px-2 py-1 rounded-full font-medium',
+                                          getConditionColor(m.returnCondition || state.condition),
+                                        )}
+                                      >
+                                        已归还 · {getConditionLabel(m.returnCondition || state.condition)}
+                                      </span>
+                                    )}
+                                  </div>
+                                </div>
+                                {m.returnedAt && (
+                                  <div className="mt-2 text-xs text-slate-500 flex items-center gap-1 pl-10">
+                                    <Clock className="w-3 h-3" />
+                                    归还时间：{formatDateTime(m.returnedAt)}
+                                  </div>
+                                )}
+                              </div>
+                            )
+                          })}
+                        </div>
+                      )}
+                    </div>
+
                     <div className="border-t border-slate-200 pt-5 space-y-4">
                       <div className="text-sm font-semibold text-slate-700 flex items-center gap-2">
                         <LogOut className="w-4 h-4 text-brand-600" />
@@ -505,13 +809,32 @@ export default function CheckOut() {
                       </div>
                     </div>
 
-                    <button
-                      onClick={handleCheckOut}
-                      className="btn-primary w-full py-2.5"
-                    >
-                      <LogOut className="w-4 h-4" />
-                      确认离场核销
-                    </button>
+                    {materialReturnStats.unreturned > 0 ? (
+                      <div className="space-y-2">
+                        <div className="flex items-center gap-2 text-xs text-amber-600 bg-amber-50 p-3 rounded-lg">
+                          <AlertTriangle className="w-4 h-4 shrink-0" />
+                          <span>
+                            还有 <strong>{materialReturnStats.unreturned}</strong> 项物料未归还，
+                            {materialReturnStats.unreturned === 1 ? '该项' : '这些'}物料必须归还后才能离场
+                          </span>
+                        </div>
+                        <button
+                          disabled
+                          className="btn-primary w-full py-2.5 opacity-50 cursor-not-allowed"
+                        >
+                          <XCircle className="w-4 h-4" />
+                          请先完成物料归还
+                        </button>
+                      </div>
+                    ) : (
+                      <button
+                        onClick={handleCheckOut}
+                        className="btn-primary w-full py-2.5"
+                      >
+                        <LogOut className="w-4 h-4" />
+                        确认离场核销
+                      </button>
+                    )}
                   </>
                 )}
 

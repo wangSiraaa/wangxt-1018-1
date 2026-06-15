@@ -7,12 +7,14 @@ import BatchList from '@/pages/BatchList'
 import BatchCreate from '@/pages/BatchCreate'
 import VisitorBooking from '@/pages/VisitorBooking'
 import ReceptionDesk from '@/pages/ReceptionDesk'
+import ReceptionWorkbench from '@/pages/ReceptionWorkbench'
 import SecretApproval from '@/pages/SecretApproval'
 import WaitingList from '@/pages/WaitingList'
 import RouteSchedule from '@/pages/RouteSchedule'
 import SecurityList from '@/pages/SecurityList'
 import CheckOut from '@/pages/CheckOut'
 import AuditLogs from '@/pages/AuditLogs'
+import DemoCenter from '@/pages/DemoCenter'
 import { useAppStore } from '@/store/appStore'
 
 export default function App() {
@@ -44,12 +46,14 @@ export default function App() {
             <Route path="/batches/new" element={<BatchCreate />} />
             <Route path="/batches/edit/:id" element={<BatchCreate />} />
             <Route path="/reception" element={<ReceptionDesk />} />
+            <Route path="/workbench" element={<ReceptionWorkbench />} />
             <Route path="/secret" element={<SecretApproval />} />
             <Route path="/waiting" element={<WaitingList />} />
             <Route path="/routes" element={<RouteSchedule />} />
             <Route path="/security" element={<SecurityList />} />
             <Route path="/checkout" element={<CheckOut />} />
             <Route path="/audit" element={<AuditLogs />} />
+            <Route path="/demo" element={<DemoCenter />} />
             <Route path="*" element={<NotFound />} />
           </Routes>
         </main>

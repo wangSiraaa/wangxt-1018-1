@@ -14,6 +14,8 @@ import {
   ChevronLeft,
   ChevronRight,
   Pill,
+  Workflow,
+  Sparkles,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
@@ -29,6 +31,7 @@ const groups = [
   {
     title: '接待流程',
     items: [
+      { to: '/workbench', label: '接待工作台', icon: Workflow },
       { to: '/reception', label: '接待签到台', icon: UserCheck },
       { to: '/secret', label: '涉密审批', icon: ShieldCheck },
       { to: '/waiting', label: '候补队列', icon: Timer },
@@ -40,6 +43,12 @@ const groups = [
     title: '合规审计',
     items: [
       { to: '/audit', label: '审计日志', icon: FileText },
+    ],
+  },
+  {
+    title: '验收演示',
+    items: [
+      { to: '/demo', label: '演示中心', icon: Sparkles },
     ],
   },
 ]

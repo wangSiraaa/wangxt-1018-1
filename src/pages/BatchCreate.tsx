@@ -15,12 +15,23 @@ import {
   Route as RouteIcon,
   FileText,
   Camera,
+  RefreshCw,
+  Wrench,
+  Shield,
+  BadgeCheck,
+  BookOpen,
+  ShoppingBag,
+  Phone,
+  Package,
+  Shirt,
+  Sparkles,
+  Zap,
 } from 'lucide-react'
 import { useAppStore } from '@/store/appStore'
 import { PageHeader, PageTitle, PageActions } from '@/components/PageHeader'
 import Alert from '@/components/Alert'
 import { todayStr } from '@/lib/utils'
-import type { ConflictInfo } from '@/types'
+import type { ConflictInfo, ConflictResolutionSuggestion, StaffMember } from '@/types'
 
 export default function BatchCreate() {
   const navigate = useNavigate()
@@ -30,9 +41,15 @@ export default function BatchCreate() {
   const routes = useAppStore((s) => s.routes)
   const guides = useAppStore((s) => s.guides)
   const batches = useAppStore((s) => s.batches)
+  const staff = useAppStore((s) => s.staff)
   const currentUser = useAppStore((s) => s.currentUser)
   const createBatch = useAppStore((s) => s.createBatch)
   const checkBatchConflicts = useAppStore((s) => s.checkBatchConflicts)
+  const getConflictResolutionSuggestions = useAppStore((s) => s.getConflictResolutionSuggestions)
+  const resolveBatchConflict = useAppStore((s) => s.resolveBatchConflict)
+  const calculateBatchStaff = useAppStore((s) => s.calculateBatchStaff)
+  const calculateBatchMaterials = useAppStore((s) => s.calculateBatchMaterials)
+  const updateBatch = useAppStore((s) => s.updateBatch)
 
   const editBatch = useMemo(() => batches.find((b) => b.id === id), [batches, id])
 
@@ -70,26 +87,79 @@ export default function BatchCreate() {
   const hasErrorConflict = conflicts.some((c) => c.level === 'error')
   const hasWarningConflict = conflicts.some((c) => c.level === 'warning')
 
-  const isValid = useMemo(() => {
-    return (
-      form.name.trim().length > 0 &&
-      form.date.length > 0 &&
-      form.startTime.length > 0 &&
-      form.endTime.length > 0 &&
-      form.startTime < form.endTime &&
-      form.routeId.length > 0 &&
-      form.guideId.length > 0 &&
-      form.capacity > 0
-    )
-  }, [form])
+  const conflictSuggestions: ConflictResolutionSuggestion[] = useMemo(() => {
+    if (!id || conflicts.length === 0) return []
+    return getConflictResolutionSuggestions(id)
+  }, [id, conflicts.length, getConflictResolutionSuggestions])
 
-  const handleSubmit = (publishNow: boolean) => {
+  const previewStaffAssignment = useMemo(() => {
+    if (!form.routeId || !form.date) return null
+    const hasSecretZone = selectedRoute?.zones.some((z) => z.isSecret) || false
+    const estimatedPeople = form.capacity
+    const today = new Date(form.date).getDay()
+
+    const availableReception = staff.filter(
+      (s) => s.role === 'reception' && s.isOnDuty && s.workDays.includes(today),
+    )
+    const availableSecurity = staff.filter(
+      (s) => s.role === 'security' && s.isOnDuty && s.workDays.includes(today),
+    )
+
+    const receptionCount = Math.min(
+      Math.max(1, Math.ceil(estimatedPeople / 15)),
+      availableReception.length,
+    )
+    const securityCount = Math.min(
+      Math.max(hasSecretZone ? 2 : 1, Math.ceil(estimatedPeople / 20)),
+      availableSecurity.length,
+    )
+
+    return {
+      reception: availableReception.slice(0, receptionCount),
+      security: availableSecurity.slice(0, securityCount),
+      receptionCount,
+      securityCount,
+      hasSecretZone,
+    }
+  }, [form.routeId, form.date, form.capacity, selectedRoute, staff])
+
+  const previewMaterials = useMemo(() => {
+    if (!form.routeId) return null
+    const hasSecretZone = selectedRoute?.zones.some((z) => z.isSecret) || false
+    const hasSampleZone = selectedRoute?.zones.some((z) => z.name.includes('样品')) || false
+    const estimatedPeople = form.capacity
+
+    return {
+      badgeCount: estimatedPeople,
+      brochureCount: estimatedPeople,
+      bagCount: estimatedPeople,
+      sampleCount: hasSampleZone ? estimatedPeople : 0,
+      safetyVestCount: hasSecretZone ? estimatedPeople : 0,
+      phoneBagCount: hasSecretZone ? estimatedPeople : 0,
+    }
+  }, [form.routeId, form.capacity, selectedRoute])
+
+  const applySuggestion = (suggestion: ConflictResolutionSuggestion) => {
+    if (!id) return
+    resolveBatchConflict(id, suggestion, currentUser)
+
+    if (suggestion.type === 'time') {
+      const [start, end] = suggestion.suggestedValue.split('-')
+      updateField('startTime', start)
+      updateField('endTime', end)
+    } else if (suggestion.type === 'route') {
+      const newRoute = routes.find((r) => r.name === suggestion.suggestedValue)
+      if (newRoute) updateField('routeId', newRoute.id)
+    } else if (suggestion.type === 'guide') {
+      const newGuide = guides.find((g) => g.name === suggestion.suggestedValue)
+      if (newGuide) updateField('guideId', newGuide.id)
+    }
+  }
+
+  const handleSubmitEnhanced = (publishNow: boolean) => {
     setSubmitted(true)
     if (!isValid) return
-
-    if (hasErrorConflict) {
-      return
-    }
+    if (hasErrorConflict) return
 
     const newBatch = createBatch({
       name: form.name.trim(),
@@ -104,11 +174,33 @@ export default function BatchCreate() {
       notes: form.notes.trim() || undefined,
     })
 
+    if (publishNow) {
+      setTimeout(() => {
+        calculateBatchStaff(newBatch.id, 'create')
+        calculateBatchMaterials(newBatch.id)
+      }, 100)
+    }
+
     setShowSuccess(true)
     setTimeout(() => {
       navigate('/batches')
     }, 1500)
   }
+
+  const isValid = useMemo(() => {
+    return (
+      form.name.trim().length > 0 &&
+      form.date.length > 0 &&
+      form.startTime.length > 0 &&
+      form.endTime.length > 0 &&
+      form.startTime < form.endTime &&
+      form.routeId.length > 0 &&
+      form.guideId.length > 0 &&
+      form.capacity > 0
+    )
+  }, [form])
+
+  const handleSubmit = handleSubmitEnhanced
 
   const updateField = <K extends keyof typeof form>(key: K, value: (typeof form)[K]) => {
     setForm((p) => ({ ...p, [key]: value }))
@@ -356,6 +448,181 @@ export default function BatchCreate() {
                     </div>
                   </div>
                 ))}
+              </div>
+            </div>
+          )}
+
+          {conflictSuggestions.length > 0 && (
+            <div className="card p-6">
+              <h2 className="font-bold text-slate-800 text-lg mb-4 flex items-center gap-2">
+                <Wrench className="w-5 h-5 text-brand-600" />
+                智能重排建议
+                <span className="badge bg-brand-100 text-brand-700 text-xs">
+                  <Sparkles className="w-3 h-3" />
+                  AI 建议
+                </span>
+              </h2>
+              <div className="space-y-3">
+                {conflictSuggestions.map((s, i) => (
+                  <div
+                    key={i}
+                    className={`flex items-start gap-3 p-4 rounded-xl border ${
+                      s.impactLevel === 'high'
+                        ? 'bg-red-50 border-red-200'
+                        : s.impactLevel === 'medium'
+                          ? 'bg-amber-50 border-amber-200'
+                          : 'bg-emerald-50 border-emerald-200'
+                    }`}
+                  >
+                    <div className={`w-8 h-8 rounded-full flex items-center justify-center shrink-0 ${
+                      s.impactLevel === 'high'
+                        ? 'bg-red-500 text-white'
+                        : s.impactLevel === 'medium'
+                          ? 'bg-amber-500 text-white'
+                          : 'bg-emerald-500 text-white'
+                    }`}>
+                      <Zap className="w-4 h-4" />
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <div className="font-semibold text-sm text-slate-800">
+                        {s.suggestion}
+                      </div>
+                      <div className="text-xs text-slate-500 mt-1">
+                        原：{s.originalValue} → 建议：{s.suggestedValue}
+                      </div>
+                      {s.affectedBatches && s.affectedBatches.length > 0 && (
+                        <div className="text-xs text-orange-600 mt-1">
+                          影响批次：{s.affectedBatches.length} 个
+                        </div>
+                      )}
+                      <div className="mt-3">
+                        <button
+                          className="btn-primary !py-1.5 !px-3 text-xs"
+                          onClick={() => applySuggestion(s)}
+                        >
+                          <RefreshCw className="w-3 h-3" />
+                          一键应用
+                        </button>
+                      </div>
+                    </div>
+                    <div className={`px-2 py-0.5 rounded text-[10px] font-bold shrink-0 ${
+                      s.impactLevel === 'high'
+                        ? 'bg-red-100 text-red-700'
+                        : s.impactLevel === 'medium'
+                          ? 'bg-amber-100 text-amber-700'
+                          : 'bg-emerald-100 text-emerald-700'
+                    }`}>
+                      {s.impactLevel === 'high' ? '高影响' : s.impactLevel === 'medium' ? '中影响' : '低影响'}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {previewStaffAssignment && (
+            <div className="card p-6">
+              <h2 className="font-bold text-slate-800 text-lg mb-4 flex items-center gap-2">
+                <Users className="w-5 h-5 text-brand-600" />
+                人员自动分配预览
+              </h2>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div className="p-4 bg-sky-50 rounded-xl border border-sky-200">
+                  <div className="flex items-center gap-2 mb-3">
+                    <BadgeCheck className="w-4 h-4 text-sky-600" />
+                    <span className="font-semibold text-sky-800">接待员</span>
+                    <span className="badge bg-sky-500 text-white text-xs">
+                      {previewStaffAssignment.receptionCount} 人
+                    </span>
+                  </div>
+                  <div className="space-y-2">
+                    {previewStaffAssignment.reception.map((s: StaffMember) => (
+                      <div key={s.id} className="flex items-center gap-2 text-sm">
+                        <div className="w-6 h-6 rounded-full bg-sky-500 text-white flex items-center justify-center text-xs font-bold">
+                          {s.name.charAt(0)}
+                        </div>
+                        <span className="text-sky-800">{s.name}</span>
+                        <span className="text-xs text-sky-600">· {s.title}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+                <div className="p-4 bg-red-50 rounded-xl border border-red-200">
+                  <div className="flex items-center gap-2 mb-3">
+                    <Shield className="w-4 h-4 text-red-600" />
+                    <span className="font-semibold text-red-800">安保人员</span>
+                    <span className="badge bg-red-500 text-white text-xs">
+                      {previewStaffAssignment.securityCount} 人
+                      {previewStaffAssignment.hasSecretZone && ' (涉密加倍)'}
+                    </span>
+                  </div>
+                  <div className="space-y-2">
+                    {previewStaffAssignment.security.map((s: StaffMember) => (
+                      <div key={s.id} className="flex items-center gap-2 text-sm">
+                        <div className="w-6 h-6 rounded-full bg-red-500 text-white flex items-center justify-center text-xs font-bold">
+                          {s.name.charAt(0)}
+                        </div>
+                        <span className="text-red-800">{s.name}</span>
+                        <span className="text-xs text-red-600">· {s.title}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+              <div className="mt-3 text-xs text-slate-500 flex items-center gap-1">
+                <Sparkles className="w-3 h-3" />
+                系统根据人数（{form.capacity}人）和路线类型自动计算，每15人配1名接待员，每20人配1名安保（涉密路线加倍）
+              </div>
+            </div>
+          )}
+
+          {previewMaterials && (
+            <div className="card p-6">
+              <h2 className="font-bold text-slate-800 text-lg mb-4 flex items-center gap-2">
+                <Package className="w-5 h-5 text-brand-600" />
+                物料自动计算预览
+              </h2>
+              <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
+                <div className="p-3 bg-slate-50 rounded-xl border border-slate-200 text-center">
+                  <BadgeCheck className="w-5 h-5 mx-auto mb-1 text-slate-600" />
+                  <div className="text-lg font-bold text-slate-800">{previewMaterials.badgeCount}</div>
+                  <div className="text-xs text-slate-500">胸卡</div>
+                </div>
+                <div className="p-3 bg-slate-50 rounded-xl border border-slate-200 text-center">
+                  <BookOpen className="w-5 h-5 mx-auto mb-1 text-slate-600" />
+                  <div className="text-lg font-bold text-slate-800">{previewMaterials.brochureCount}</div>
+                  <div className="text-xs text-slate-500">宣传册</div>
+                </div>
+                <div className="p-3 bg-slate-50 rounded-xl border border-slate-200 text-center">
+                  <ShoppingBag className="w-5 h-5 mx-auto mb-1 text-slate-600" />
+                  <div className="text-lg font-bold text-slate-800">{previewMaterials.bagCount}</div>
+                  <div className="text-xs text-slate-500">环保袋</div>
+                </div>
+                {previewMaterials.sampleCount > 0 && (
+                  <div className="p-3 bg-purple-50 rounded-xl border border-purple-200 text-center">
+                    <Package className="w-5 h-5 mx-auto mb-1 text-purple-600" />
+                    <div className="text-lg font-bold text-purple-800">{previewMaterials.sampleCount}</div>
+                    <div className="text-xs text-purple-600">样品</div>
+                  </div>
+                )}
+                {previewMaterials.safetyVestCount > 0 && (
+                  <div className="p-3 bg-amber-50 rounded-xl border border-amber-200 text-center">
+                    <Shirt className="w-5 h-5 mx-auto mb-1 text-amber-600" />
+                    <div className="text-lg font-bold text-amber-800">{previewMaterials.safetyVestCount}</div>
+                    <div className="text-xs text-amber-600">安全背心</div>
+                  </div>
+                )}
+                {previewMaterials.phoneBagCount > 0 && (
+                  <div className="p-3 bg-red-50 rounded-xl border border-red-200 text-center">
+                    <Phone className="w-5 h-5 mx-auto mb-1 text-red-600" />
+                    <div className="text-lg font-bold text-red-800">{previewMaterials.phoneBagCount}</div>
+                    <div className="text-xs text-red-600">封存袋</div>
+                  </div>
+                )}
+              </div>
+              <div className="mt-3 text-xs text-slate-500 flex items-center gap-1">
+                <Sparkles className="w-3 h-3" />
+                系统根据路线配置自动计算，涉密路线额外配安全背心和手机封存袋，样品展区路线配样品
               </div>
             </div>
           )}

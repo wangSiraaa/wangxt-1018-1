@@ -23,12 +23,18 @@ import {
   FileCheck,
   ArrowRight,
   Home,
+  Globe,
+  ShieldCheck,
+  ShieldX,
+  UserCheck,
+  Clock3,
+  BadgeInfo,
 } from 'lucide-react'
 import { useAppStore } from '@/store/appStore'
 import Stepper from '@/components/Stepper'
 import Alert from '@/components/Alert'
 import { uid, formatDate, statusBadge } from '@/lib/utils'
-import type { Visitor, Vehicle } from '@/types'
+import type { Visitor, Vehicle, VisitorValidationResult, VisitorCategory } from '@/types'
 
 type StepKey = 'validate' | 'fill' | 'confirm'
 
@@ -41,6 +47,10 @@ export default function VisitorBooking() {
   const routes = useAppStore((s) => s.routes)
   const guides = useAppStore((s) => s.guides)
   const createVisitRecord = useAppStore((s) => s.createVisitRecord)
+  const validateVisitor = useAppStore((s) => s.validateVisitor)
+  const getExternalPartner = useAppStore((s) => s.getExternalPartner)
+  const getForeignConfig = useAppStore((s) => s.getForeignConfig)
+  const foreignConfigs = useAppStore((s) => s.foreignConfigs)
 
   const batch = batchId ? getBatchById(batchId) : undefined
   const route = batch ? routes.find((r) => r.id === batch.routeId) : undefined
@@ -61,17 +71,23 @@ export default function VisitorBooking() {
       idNumber: '',
       phone: '',
       isPrimary: true,
+      nationality: '中国',
+      isForeign: false,
     },
   ])
   const [vehicle, setVehicle] = useState<Vehicle | null>(null)
   const [showVehicle, setShowVehicle] = useState(false)
   const [blacklistChecked, setBlacklistChecked] = useState(false)
+  const [validationChecked, setValidationChecked] = useState(false)
   const [result, setResult] = useState<null | {
     success: boolean
     recordCode?: string
     waitingList?: boolean
     waitingRank?: number
     message?: string
+    needsApproval?: boolean
+    approvalMessage?: string
+    visitorCategory?: VisitorCategory
   }>(null)
   const [formErrors, setFormErrors] = useState<Record<string, string>>({})
 
@@ -86,10 +102,71 @@ export default function VisitorBooking() {
     return isCompanyBlacklisted(companyName)
   }, [companyName, blacklistChecked, isCompanyBlacklisted])
 
+  const validationResult = useMemo<VisitorValidationResult | undefined>(() => {
+    if (!companyName.trim() || !validationChecked) return undefined
+    const hasAnyVisitorData = visitors.some((v) => v.name.trim() && v.idNumber.trim())
+    if (!hasAnyVisitorData) return undefined
+    return validateVisitor(companyName, visitors)
+  }, [companyName, validationChecked, visitors, validateVisitor])
+
+  const partnerInfo = useMemo(() => {
+    if (!companyName.trim()) return undefined
+    return getExternalPartner(companyName)
+  }, [companyName, getExternalPartner])
+
+  const hasForeignVisitor = useMemo(() => {
+    return visitors.some((v) => v.isForeign)
+  }, [visitors])
+
   const totalPeople = visitors.length
   const willOverflow = batch ? usedCapacity + totalPeople > batch.capacity : false
 
   const primaryVisitor = visitors.find((v) => v.isPrimary)
+
+  const getCategoryIcon = (category: VisitorCategory) => {
+    switch (category) {
+      case 'blacklist':
+        return <ShieldX className="w-4 h-4" />
+      case 'foreign':
+        return <Globe className="w-4 h-4" />
+      case 'external_partner':
+        return <BadgeInfo className="w-4 h-4" />
+      case 'vip':
+        return <Star className="w-4 h-4" />
+      default:
+        return <UserCheck className="w-4 h-4" />
+    }
+  }
+
+  const getCategoryLabel = (category: VisitorCategory) => {
+    switch (category) {
+      case 'blacklist':
+        return '黑名单单位'
+      case 'foreign':
+        return '外籍访客'
+      case 'external_partner':
+        return '外部合作单位'
+      case 'vip':
+        return 'VIP客户'
+      default:
+        return '内部访客'
+    }
+  }
+
+  const getCategoryColor = (category: VisitorCategory) => {
+    switch (category) {
+      case 'blacklist':
+        return 'bg-red-100 text-red-700 border-red-200'
+      case 'foreign':
+        return 'bg-blue-100 text-blue-700 border-blue-200'
+      case 'external_partner':
+        return 'bg-purple-100 text-purple-700 border-purple-200'
+      case 'vip':
+        return 'bg-amber-100 text-amber-700 border-amber-200'
+      default:
+        return 'bg-emerald-100 text-emerald-700 border-emerald-200'
+    }
+  }
 
   const steps = [
     { key: 'validate', title: '验证批次', done: !!batch, active: step === 'validate' },
@@ -101,7 +178,12 @@ export default function VisitorBooking() {
     setVisitors((prev) =>
       prev.map((v, i) => {
         if (i !== idx) return v
-        const next = { ...v, ...patch }
+        let next = { ...v, ...patch }
+        if (patch.idType === '护照') {
+          next = { ...next, isForeign: true, nationality: next.nationality || '美国' }
+        } else if (patch.idType === '身份证') {
+          next = { ...next, isForeign: false, nationality: '中国' }
+        }
         if (patch.isPrimary === true) {
           return next
         }
@@ -113,6 +195,7 @@ export default function VisitorBooking() {
         prev.map((v, i) => (i === idx ? v : { ...v, isPrimary: false })),
       )
     }
+    setValidationChecked(true)
   }
 
   const addVisitor = () => {
@@ -125,6 +208,8 @@ export default function VisitorBooking() {
         idNumber: '',
         phone: '',
         isPrimary: false,
+        nationality: '中国',
+        isForeign: false,
       },
     ])
   }
@@ -144,11 +229,12 @@ export default function VisitorBooking() {
   const validateForm = (): boolean => {
     const errors: Record<string, string> = {}
     setBlacklistChecked(true)
+    setValidationChecked(true)
 
     if (!companyName.trim()) {
       errors.companyName = '请输入单位名称'
-    } else if (blacklistMatch) {
-      errors.companyName = '该企业已被列入黑名单，无法预约'
+    } else if (validationResult?.level === 'block') {
+      errors.companyName = validationResult.message
     }
     if (!purpose.trim()) errors.purpose = '请输入参观目的'
     if (!/^1[3-9]\d{9}$/.test(contactPhone)) errors.contactPhone = '请输入有效的手机号码'
@@ -162,8 +248,13 @@ export default function VisitorBooking() {
         errors[`v_${i}_idNumber`] = '请输入证件号'
       } else if (v.idType === '身份证' && !/^\d{17}[\dXx]$/.test(v.idNumber)) {
         errors[`v_${i}_idNumber`] = '身份证号格式不正确'
+      } else if (v.idType === '护照' && !/^[A-Za-z0-9]{5,}$/.test(v.idNumber)) {
+        errors[`v_${i}_idNumber`] = '护照号格式不正确'
       }
       if (!/^1[3-9]\d{9}$/.test(v.phone)) errors[`v_${i}_phone`] = '请输入有效手机号'
+      if (v.isForeign && !v.nationality?.trim()) {
+        errors[`v_${i}_nationality`] = '请输入国籍'
+      }
     })
 
     if (showVehicle && vehicle) {
@@ -183,20 +274,28 @@ export default function VisitorBooking() {
     setStep('confirm')
   }
 
+  const isFormBlocked = useMemo(() => {
+    return !!blacklistMatch || validationResult?.level === 'block'
+  }, [blacklistMatch, validationResult])
+
   const handleSubmit = () => {
-    if (!batch || blacklistMatch) return
+    if (!batch || isFormBlocked) return
 
     const primary = visitors.find((v) => v.isPrimary) || visitors[0]
+    const currentValidation = validationResult || validateVisitor(companyName, visitors)
+
+    const visitorsWithCategory = visitors.map((v) => ({
+      ...v,
+      name: v.name.trim(),
+      idNumber: v.idNumber.trim(),
+      phone: v.phone.trim(),
+      category: currentValidation.category as Visitor['category'],
+    }))
 
     const resp = createVisitRecord({
       batchId: batch.id,
       companyName: companyName.trim(),
-      visitors: visitors.map((v) => ({
-        ...v,
-        name: v.name.trim(),
-        idNumber: v.idNumber.trim(),
-        phone: v.phone.trim(),
-      })),
+      visitors: visitorsWithCategory,
       vehicle: showVehicle ? vehicle || undefined : undefined,
       purpose: purpose.trim(),
       contactPhone: contactPhone || primary.phone,
@@ -204,11 +303,24 @@ export default function VisitorBooking() {
     })
 
     if (resp.success && resp.record) {
+      const needsApproval = currentValidation.level === 'require_approval'
+      if (needsApproval) {
+        resp.record.visitorCategory = currentValidation.category
+        resp.record.validationResult = currentValidation
+        resp.record.additionalApprovalRequired = true
+        resp.record.additionalApprovalStatus = 'pending'
+        resp.record.additionalApprovalReason = currentValidation.message
+        resp.record.status = 'additional_approval_required'
+      }
+
       setResult({
         success: true,
         recordCode: resp.record.code,
         waitingList: resp.record.inWaitingList,
         waitingRank: resp.record.waitingRank,
+        needsApproval,
+        approvalMessage: needsApproval ? currentValidation.message : undefined,
+        visitorCategory: currentValidation.category,
       })
     } else {
       setResult({ success: false, message: resp.message })
@@ -253,7 +365,11 @@ export default function VisitorBooking() {
           <div className="card p-10 text-center">
             {result.success ? (
               <>
-                {result.waitingList ? (
+                {result.needsApproval ? (
+                  <div className="w-20 h-20 mx-auto mb-5 rounded-2xl bg-gradient-to-br from-amber-400 to-orange-500 text-white flex items-center justify-center shadow-lg">
+                    <Clock3 className="w-10 h-10" />
+                  </div>
+                ) : result.waitingList ? (
                   <div className="w-20 h-20 mx-auto mb-5 rounded-2xl bg-gradient-to-br from-amber-400 to-orange-500 text-white flex items-center justify-center shadow-lg">
                     <Clock className="w-10 h-10" />
                   </div>
@@ -263,16 +379,37 @@ export default function VisitorBooking() {
                   </div>
                 )}
                 <h1 className="text-2xl font-bold text-slate-800 mb-2">
-                  {result.waitingList ? '已进入候补队列' : '预约提交成功'}
+                  {result.needsApproval ? '预约已提交，待审批' :
+                   result.waitingList ? '已进入候补队列' : '预约提交成功'}
                 </h1>
                 <p className="text-slate-500 mb-6">
                   申请编号：
                   <span className="font-mono font-semibold text-slate-700">{result.recordCode}</span>
                 </p>
+                {result.visitorCategory && (
+                  <div className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-sm font-medium mb-5 ${getCategoryColor(result.visitorCategory)}`}>
+                    {getCategoryIcon(result.visitorCategory)}
+                    {getCategoryLabel(result.visitorCategory)}
+                  </div>
+                )}
                 <div className={`p-5 rounded-xl mb-8 ${
-                  result.waitingList ? 'bg-amber-50 border border-amber-200' : 'bg-emerald-50 border border-emerald-200'
+                  result.needsApproval ? 'bg-amber-50 border border-amber-200' :
+                  result.waitingList ? 'bg-amber-50 border border-amber-200' :
+                  'bg-emerald-50 border border-emerald-200'
                 }`}>
-                  {result.waitingList ? (
+                  {result.needsApproval ? (
+                    <div className="space-y-2">
+                      <div className="font-semibold text-amber-800">
+                        审批流程已启动
+                      </div>
+                      <p className="text-sm text-amber-700">
+                        {result.approvalMessage || '您的预约需要额外审批。'}
+                      </p>
+                      <p className="text-xs text-amber-600 mt-2">
+                        审批通过后系统将通过短信通知主联系人。审批期间您可以在"我的预约"中查看进度。
+                      </p>
+                    </div>
+                  ) : result.waitingList ? (
                     <div className="space-y-2">
                       <div className="font-semibold text-amber-800">
                         当前排位：第 <span className="text-2xl font-bold">{result.waitingRank}</span> 位
@@ -333,10 +470,13 @@ export default function VisitorBooking() {
                       setContactEmail('')
                       setVisitors([{
                         id: uid('v_tmp'), name: '', idType: '身份证', idNumber: '', phone: '', isPrimary: true,
+                        nationality: '中国', isForeign: false,
                       }])
                       setVehicle(null)
                       setShowVehicle(false)
                       setBlacklistChecked(false)
+                      setValidationChecked(false)
+                      setFormErrors({})
                       setStep('fill')
                     }}
                   >
@@ -471,13 +611,46 @@ export default function VisitorBooking() {
                   onChange={(e) => {
                     setCompanyName(e.target.value)
                     setBlacklistChecked(true)
+                    setValidationChecked(true)
                   }}
-                  onBlur={() => setBlacklistChecked(true)}
+                  onBlur={() => {
+                    setBlacklistChecked(true)
+                    setValidationChecked(true)
+                  }}
                 />
-                {blacklistChecked && !formErrors.companyName && !blacklistMatch && companyName.trim() && (
-                  <div className="text-xs text-emerald-600 mt-1.5 inline-flex items-center gap-1">
-                    <CheckCircle2 className="w-3.5 h-3.5" />
-                    黑名单校验通过
+                {validationResult && validationResult.level !== 'block' && companyName.trim() && (
+                  <div className="mt-2.5">
+                    <div className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md border text-xs font-medium ${getCategoryColor(validationResult.category)}`}>
+                      {getCategoryIcon(validationResult.category)}
+                      {getCategoryLabel(validationResult.category)}
+                    </div>
+                    <div className="mt-1.5">
+                      {validationResult.level === 'allow' && (
+                        <div className="text-xs text-emerald-600 inline-flex items-center gap-1">
+                          <CheckCircle2 className="w-3.5 h-3.5" />
+                          {validationResult.message}
+                        </div>
+                      )}
+                      {validationResult.level === 'require_approval' && (
+                        <div className="text-xs text-amber-600 inline-flex items-center gap-1">
+                          <Clock3 className="w-3.5 h-3.5" />
+                          {validationResult.message}
+                          <span className="ml-1 text-amber-500">·提交后将自动触发审批流程</span>
+                        </div>
+                      )}
+                    </div>
+                    {partnerInfo && (
+                      <div className="mt-1.5 text-xs text-slate-500">
+                        合作级别：{partnerInfo.cooperationLevel === 'strategic' ? '战略合作伙伴' : partnerInfo.cooperationLevel === 'important' ? '重要合作伙伴' : '普通合作单位'}
+                        {partnerInfo.contractExpiryDate && ` · 合同到期：${formatDate(partnerInfo.contractExpiryDate)}`}
+                      </div>
+                    )}
+                  </div>
+                )}
+                {blacklistChecked && !validationResult && !formErrors.companyName && !blacklistMatch && !partnerInfo && companyName.trim() && (
+                  <div className="text-xs text-slate-500 mt-1.5 inline-flex items-center gap-1">
+                    <UserCheck className="w-3.5 h-3.5" />
+                    普通访客，校验通过
                   </div>
                 )}
                 {formErrors.companyName && (
@@ -665,6 +838,45 @@ export default function VisitorBooking() {
                         <div className="text-xs text-red-600 mt-1">{formErrors[`v_${i}_idNumber`]}</div>
                       )}
                     </div>
+                    {v.isForeign && (
+                      <>
+                        <div className="md:col-span-2">
+                          <label className="label !mb-1">
+                            国籍 <span className="text-red-500">*</span>
+                          </label>
+                          <select
+                            className={`input ${formErrors[`v_${i}_nationality`] ? '!border-red-400' : ''}`}
+                            value={v.nationality || ''}
+                            onChange={(e) => {
+                              const nationality = e.target.value
+                              updateVisitor(i, { nationality })
+                              const config = getForeignConfig(nationality)
+                              if (config) {
+                                console.log('外籍访客配置:', config)
+                              }
+                            }}
+                          >
+                            <option value="">请选择国籍</option>
+                            {foreignConfigs.filter(c => c.isActive).map((c) => (
+                              <option key={c.id} value={c.nationality}>
+                                {c.country}（{c.nationality}）
+                              </option>
+                            ))}
+                          </select>
+                          {formErrors[`v_${i}_nationality`] && (
+                            <div className="text-xs text-red-600 mt-1">{formErrors[`v_${i}_nationality`]}</div>
+                          )}
+                          {v.nationality && getForeignConfig(v.nationality) && (
+                            <div className="mt-1.5 text-xs text-blue-600 inline-flex items-center gap-1">
+                              <ShieldCheck className="w-3.5 h-3.5" />
+                              {`${v.nationality}籍访客需${getForeignConfig(v.nationality)!.approvalRequirement === 'ministry' ? '部委' : getForeignConfig(v.nationality)!.approvalRequirement === 'ceo' ? 'CEO' : getForeignConfig(v.nationality)!.approvalRequirement === 'director' ? '总监' : '经理'}级审批`}
+                              {getForeignConfig(v.nationality)!.requiresBackgroundCheck && ' · 需背景调查'}
+                              {getForeignConfig(v.nationality)!.requiresNotification && ` · 通知${getForeignConfig(v.nationality)!.notificationDepartment}`}
+                            </div>
+                          )}
+                        </div>
+                      </>
+                    )}
                   </div>
                 </div>
               ))}
@@ -754,7 +966,7 @@ export default function VisitorBooking() {
               <button
                 className="btn-primary px-6"
                 onClick={handleNext}
-                disabled={!!blacklistMatch}
+                disabled={isFormBlocked}
               >
                 下一步 · 确认信息
                 <ChevronRight className="w-4 h-4" />
@@ -891,6 +1103,66 @@ export default function VisitorBooking() {
                   </div>
                 </div>
               )}
+
+              {validationResult && validationResult.level === 'require_approval' && (
+                <div className="p-4 rounded-xl bg-amber-50 border border-amber-200">
+                  <div className="flex items-start gap-3">
+                    <Clock3 className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
+                    <div className="flex-1">
+                      <div className="font-semibold text-amber-800 mb-1">
+                        需追加审批
+                      </div>
+                      <div className="text-sm text-amber-700">
+                        <div className="mb-1">{validationResult.message}</div>
+                        <div className="text-xs text-amber-600">
+                          提交后将自动发起审批流程，审批通过后预约生效。
+                          {validationResult.requiredApprovalRole && (
+                            <span>审批人级别：{
+                              validationResult.requiredApprovalRole === 'ministry' ? '部委级' :
+                              validationResult.requiredApprovalRole === 'ceo' ? 'CEO' :
+                              validationResult.requiredApprovalRole === 'director' ? '总监级' : '经理级'
+                            }</span>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {hasForeignVisitor && (
+                <div className="p-4 rounded-xl bg-blue-50 border border-blue-200">
+                  <div className="flex items-start gap-3">
+                    <Globe className="w-5 h-5 text-blue-600 shrink-0 mt-0.5" />
+                    <div className="flex-1">
+                      <div className="font-semibold text-blue-800 mb-1">
+                        外籍访客提示
+                      </div>
+                      <div className="text-sm text-blue-700">
+                        本次预约包含外籍访客，已自动触发外籍访客审批流程。
+                        请确保所有外籍访客携带有效护照原件。
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {partnerInfo && (
+                <div className="p-4 rounded-xl bg-purple-50 border border-purple-200">
+                  <div className="flex items-start gap-3">
+                    <BadgeInfo className="w-5 h-5 text-purple-600 shrink-0 mt-0.5" />
+                    <div className="flex-1">
+                      <div className="font-semibold text-purple-800 mb-1">
+                        {partnerInfo.cooperationLevel === 'strategic' ? '战略' : partnerInfo.cooperationLevel === 'important' ? '重要' : '普通'}合作伙伴
+                      </div>
+                      <div className="text-sm text-purple-700">
+                        {partnerInfo.companyName} · 联系人：{partnerInfo.contactPerson || '未设置'}
+                        {partnerInfo.contactPhone && ` · ${partnerInfo.contactPhone}`}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
             </div>
 
             <div className="flex items-center justify-between gap-3">
@@ -900,7 +1172,7 @@ export default function VisitorBooking() {
               <button
                 className="btn-primary px-8"
                 onClick={handleSubmit}
-                disabled={!!blacklistMatch}
+                disabled={isFormBlocked}
               >
                 {willOverflow ? (
                   <>
